@@ -13,8 +13,8 @@ import math
 import torch
 
 # ── Hyperparameters ───────────────────────────────────────────────
-# model_name = "emanjavacas/MacBERTh"
-model_name = "bert-base-uncased"
+model_name = "emanjavacas/MacBERTh"
+# model_name = "bert-base-uncased"
 epochs = 3
 learning_rate = 5e-5
 batch_size = 32
