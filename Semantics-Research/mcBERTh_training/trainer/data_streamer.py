@@ -16,9 +16,13 @@ Each JSONL line in our dataset includes the following fields:
     "genre": "...",  chunk_id: "...", "text": "...",}.
 
 """
+import os
+from datasets import interleave_datasets, load_dataset
+from concurrent.futures import ThreadPoolExecutor
+from google_cloud_save import download_file
 
-from datasets import interleave_datasets, load_dataset, IterableDataset
-from google_cloud_save import gcs_get_dataset_json_data
+LOCAL_CACHE = "/tmp/coha_shards"
+BUCKET = "project3102-data-bucket"
 
 
 DECADES = [
@@ -27,77 +31,75 @@ DECADES = [
 ]
 
 
-def gen(data):
-    for item in data:
-        text = item['text']  # type: ignore
-        date = item['decade']  # type: ignore
-        date = str(date).removesuffix('s')
-        yield {
-            'decade': date,
-            'text': f'<decade_{date}> ' + text
-        }
-
+def download_shards(service_account_path, root, split, decade):
+    local_path = f"{LOCAL_CACHE}/{root}/{split}/{decade}/shard_000.jsonl"
+    if not os.path.exists(local_path):
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        download_file(
+            credentials_path=service_account_path,
+            bucket_name=BUCKET,
+            file_blob_name=f"{root}/{split}/{decade}/shard_000.jsonl",
+            download_path=local_path,
+        )
+    return local_path
 
 def build_decade_balanced_stream(
         service_account_path=None,
         root="coha_sharded_full",
         split="train",
-        buffer_size=50_000,
+        stream_buffer_size=10_000,
+        interleave_buffer_size=50_000,
         seed=123,
         probabilities=None,
-        stopping_strategy="all_exhausted",):
-    """     
-    Return: 
-        A mixed IterableDataset, a streaming iterable. 
+        stopping_strategy="all_exhausted",
+        shuffle=True,
+        use_decade_tokens=True):
     """
-    # hugging face datasets:
-    # Stream and interleave datasets: https://huggingface.co/docs/datasets/stream#interleave-datasets
+    Return:
+        A mixed IterableDataset, a streaming iterable.
+    """
+    decades = [d for d in DECADES if not (split == 'valid' and d == '1810s')]
 
-    # a list of streaming datasets
+    # confirms decades are correct
+    print(f"Data streamer: split={split}, {len(decades)} decades: {decades}")
+
+    # Download all shards in parallel to local disk at startup
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        local_paths = list(pool.map(
+            lambda x: download_shards(service_account_path, root, split, x),
+            decades
+        ))
+
+    # Check all shards were downloaded successfully
+    print(f"Downloaded {len(local_paths)} shards:")
+    for path in local_paths:
+        print(f"  {path}")
+
+
     streams = []
 
-    for decade in DECADES:
-        # one streaming dataset per decade (streaming=True)
-        if split == 'valid' and decade == '1810s':
-            continue
-        raw_data = gcs_get_dataset_json_data(
-            credentials_path=service_account_path, bucket_name="project3102-data-bucket", data_blob_path=f"{root}/{split}/{decade}/shard_000.jsonl")
-        dataset = IterableDataset.from_generator(generator=gen, gen_kwargs={
-                                                 # pyright: ignore[reportArgumentType]
-                                                 'data': raw_data})
-        # dataset = load_dataset(
-        #     "json",
-        #     data_files=[f"{root}/{split}/{decade}/shard_*.jsonl"],
-        #     split="train",
-        #     streaming=True,
-        # )
-        # shuffle within decade
-        dataset = dataset.shuffle(buffer_size=buffer_size, seed=seed)
+    for local_path in local_paths:
+        
+        dataset = load_dataset(
+            "json",
+            data_files=[local_path],
+            split="train",
+            streaming=True, 
+        )
+
+        if use_decade_tokens:
+            dataset = dataset.map(lambda x: {
+                'text': f'<decade_{str(x["decade"]).removesuffix("s")}> {x["text"]}'
+            })
+        dataset = dataset.select_columns(['text'])
+
+        if shuffle:
+            dataset = dataset.shuffle(buffer_size=stream_buffer_size, seed=seed)
         streams.append(dataset)
 
-    # interleave decades
     mixed = interleave_datasets(streams, probabilities=probabilities,
-                                seed=seed, stopping_strategy=stopping_strategy)  # type: ignore
+                                seed=seed, stopping_strategy=stopping_strategy)
 
-    # shuffle the mixed dataset
-    mixed = mixed.shuffle(buffer_size=buffer_size, seed=seed)
-
+    if shuffle:
+        mixed = mixed.shuffle(buffer_size=interleave_buffer_size, seed=seed)
     return mixed
-
-
-def main():
-
-    my_dataset = build_decade_balanced_stream(
-        "nlp-research-sp26-8499634f1c62.json")
-
-    # Take a look at the first 32 examples from the dataset stream
-    for i, example in enumerate(my_dataset):
-        if i >= 2:
-            break
-        print(example)
-
-    print(len(my_dataset))
-
-
-if __name__ == "__main__":
-    main()
