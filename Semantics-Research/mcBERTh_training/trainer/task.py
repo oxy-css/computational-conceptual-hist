@@ -1,10 +1,13 @@
 from transformers import (
-    BertForMaskedLM, AutoTokenizer,
-    DataCollatorForLanguageModeling,
-    Trainer, TrainingArguments, EarlyStoppingCallback,
+    AutoTokenizer, BertConfig,
+    TrainingArguments, EarlyStoppingCallback,
     TrainerCallback
 )
 from data_streamer import build_decade_balanced_stream, DECADES
+from time_aware_model import (
+    BertForTimeAwareMLM, DataCollatorForMLMAndDating, TimeAwareTrainer,
+    preprocess_logits_for_metrics, compute_dating_metrics,
+)
 from datasets import Dataset as HFDataset
 import os
 import sys
@@ -27,20 +30,25 @@ max_steps = math.ceil(N / (batch_size * gradient_accumulation_steps)) * epochs
 warmup_ratio = 0.05
 weight_decay = 0.01
 mlm_probability = 0.15
+dating_weight = 1.0
 save_total_limit = 2
 save_steps = 500
 logging_steps = 100
 early_stopping_patience = 5
 early_stopping_threshold = 0.001
 
-# Set to False if training a decade-conditioned model
+# False for the time-aware Document Dating model
 use_decade_tokens = False
 gcs_credentials = "nlp-research-sp26.json"
 
-#temp parameters for quick testing
-# max_steps = 8
-# logging_steps = 2 
-# save_steps = 2
+# Cap the validation set size (None = use the full validation stream)
+max_val_samples = None
+
+#temp parameters for quick testing 
+max_steps = 8
+logging_steps = 2
+save_steps = 2
+max_val_samples = 128
 
 
 # ── CUDA check ─────────────────────────────────────────────────────────
@@ -98,17 +106,24 @@ train_dataset = train_dataset.map(
 print("Materializing validation set into memory...", flush=True)
 val_dataset = val_dataset.map(
     tokenize_data, batch_size=batch_size, batched=True, remove_columns=["text"])
+if max_val_samples is not None:
+    # quick-test path: only pull the first N validation examples
+    val_dataset = val_dataset.take(max_val_samples)
 val_dataset = HFDataset.from_list(list(val_dataset))
 print(f"Validation set ready: {len(val_dataset)} samples", flush=True)
 print("dataset complete, formatting model")
 
 # ── Model ─────────────────────────────────────────────────────────
-# Defining our base model means downloading from huggingface and adding in our new decade tokens.
-# we are also going to add in a callback function that helps it run smoother on google cloud
-model = BertForMaskedLM.from_pretrained(model_name)
-model.resize_token_embeddings(len(tokenizer))
+# Time-aware model: regular MLM + a Document Dating head on the [CLS] token.
+config = BertConfig.from_pretrained(model_name)
+config.num_decades = len(DECADES)
+config.dating_weight = dating_weight
+model = BertForTimeAwareMLM.from_pretrained(model_name, config=config)
+if use_decade_tokens:
+    model.resize_token_embeddings(len(tokenizer))
 
-data_collator = DataCollatorForLanguageModeling(
+
+data_collator = DataCollatorForMLMAndDating(
     tokenizer=tokenizer, mlm=True, mlm_probability=mlm_probability
 )
 
@@ -194,16 +209,22 @@ training_args = TrainingArguments(
     learning_rate=learning_rate,
     weight_decay=weight_decay,
     optim='adamw_torch',
+    # Tell the Trainer the decade id is the label for eval metrics. The joint
+    # loss (incl. MLM) is still computed because `labels` is also in the batch.
+    label_names=['dating_labels'],
 )
 print("TrainingArguments built.", flush=True)
 
 print("Building Trainer...", flush=True)
-trainer = Trainer(
+trainer = TimeAwareTrainer(
     model=model,
     args=training_args,
     train_dataset=train_dataset,
     eval_dataset=val_dataset,
     data_collator=data_collator,
+    # Report decade accuracy / MAE for the Document Dating task each eval.
+    compute_metrics=compute_dating_metrics,
+    preprocess_logits_for_metrics=preprocess_logits_for_metrics,
     callbacks=[EarlyStoppingCallback(
         early_stopping_patience=early_stopping_patience,
         early_stopping_threshold=early_stopping_threshold),
@@ -215,7 +236,10 @@ print("Trainer built.", flush=True)
 # ── Save hyperparameters and training config ──────────────────────────────────────
 params = {
     "model_name": model_name,
+    "objective": "MLM + Document Dating (joint)",
     "use_decade_tokens": use_decade_tokens,
+    "num_decades": len(DECADES),
+    "dating_weight": dating_weight,
     "training_corpus_size": N,
     "epochs_approximate": epochs,
     "max_steps": max_steps,

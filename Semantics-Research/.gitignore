@@ -7,3 +7,6 @@ service_account.json
 /Models
 /__pycache__
 mcBerth_training/trainer/__pycache__
+smoke_test.py
+checkpoint_test.py
+.gitignore

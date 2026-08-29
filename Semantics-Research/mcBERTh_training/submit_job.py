@@ -12,7 +12,8 @@ a100 = {"machine_type": "a2-highgpu-1g",
 l4 = {"machine_type": "g2-standard-8", 
       "accelerator_type": "NVIDIA_L4"}
 
-tag = "macberth-adapt-v2" # retraining
+tag = "macberth-timeaware-dd-v1" # time-aware: joint MLM + Document Dating
+# tag = "macberth-adapt-v2" # retraining
 # tag = "mcberth-decade-conditioned-v1" # trained
 # tag = "bert-base-uncased-v1" # trained
 # tag = "bert-base-uncased-conditioned-v1"
@@ -25,7 +26,8 @@ aiplatform.init(
 )
 
 # Set the tensorboard instance name
-tensorboard_name = "mcberth-tensorboard-non-conditioned-v2"
+tensorboard_name = "mcberth-tensorboard-timeaware-dd-v1"
+# tensorboard_name = "mcberth-tensorboard-non-conditioned-v2"
 # tensorboard_name = "mcberth-tensorboard" # decade-conditioned
 # tensorboard_name = "bert-tensorboard-non-conditioned"
 # tensorboard_name = "bert-tensorboard-conditioned"

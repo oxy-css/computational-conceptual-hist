@@ -30,6 +30,9 @@ DECADES = [
     "1910s", "1920s", "1930s", "1940s", "1950s", "1960s", "1970s", "1980s", "1990s", "2000s"
 ]
 
+# Integer class id for each decade, used as the label for the Document Dating
+DECADE_TO_ID = {d: i for i, d in enumerate(DECADES)}
+
 
 def download_shards(service_account_path, root, split, decade):
     local_path = f"{LOCAL_CACHE}/{root}/{split}/{decade}/shard_000.jsonl"
@@ -86,12 +89,15 @@ def build_decade_balanced_stream(
             split="train",
             streaming=True, 
         )
+        # Emit the decade as an integer class id (the Document Dating label),
+        dataset = dataset.map(lambda x: {'dating_labels': DECADE_TO_ID[x['decade']]})
 
         if use_decade_tokens:
+            #Train the Document Dating model with use_decade_tokens=False to prevent leakage
             dataset = dataset.map(lambda x: {
                 'text': f'<decade_{str(x["decade"]).removesuffix("s")}> {x["text"]}'
             })
-        dataset = dataset.select_columns(['text'])
+        dataset = dataset.select_columns(['text', 'dating_labels'])
 
         if shuffle:
             dataset = dataset.shuffle(buffer_size=stream_buffer_size, seed=seed)
